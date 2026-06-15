@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     parallel_shot_limit: int = 3
 
     # Job polling
-    job_poll_interval: int = 10   # seconds between polls
-    job_timeout: int = 600        # max seconds to wait for one job
+    job_poll_interval: float = 10.0   # seconds between polls
+    job_timeout: float = 600.0        # max seconds to wait for one job
 
     # Storage
     project_dir: str = "./projects"
