@@ -1,74 +1,115 @@
-"""Smoke test: single Wan image generation.
+"""Smoke test: single Wan image generation via DashScope native API.
 
-Generates a 512x512 test image and saves it to /tmp/auteur_smoke_image.png.
+Generates a test image and saves it to the system temp directory.
 Run: python scripts/smoke/smoke_image.py
 """
 
 import asyncio
+import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
+from _env import load_dotenv
+
+load_dotenv()
+
+_T2I_PATH = "/api/v1/services/aigc/text2image/image-synthesis"
+_TASK_PATH = "/api/v1/tasks/{task_id}"
+_DASHSCOPE_BASE = "https://dashscope-intl.aliyuncs.com"
+
+SMOKE_IMAGE = Path(tempfile.gettempdir()) / "auteur_smoke_image.png"
+
 
 async def main() -> None:
-    from openai import AsyncOpenAI
+    import httpx
 
     key = os.getenv("DASHSCOPE_API_KEY", "")
     if not key or key == "sk-...":
         print("✗ DASHSCOPE_API_KEY not set")
         sys.exit(1)
 
-    base_url = os.getenv(
-        "DASHSCOPE_BASE_URL",
-        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-    )
     model = os.getenv("MODEL_IMAGE", "wanx2.1-t2i-turbo")
 
-    print(f"endpoint : {base_url}")
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "X-DashScope-Async": "enable",
+    }
+    payload = {
+        "model": model,
+        "input": {"prompt": "A single red apple on a white background, photorealistic"},
+        "parameters": {"size": "1024*1024", "n": 1},
+    }
+
     print(f"model    : {model}")
-    print("sending  : image generation request …")
+    print(f"creating task at {_DASHSCOPE_BASE}{_T2I_PATH} …")
 
-    client = AsyncOpenAI(api_key=key, base_url=base_url)
-    t0 = time.monotonic()
+    async with httpx.AsyncClient(base_url=_DASHSCOPE_BASE, timeout=30) as client:
+        t0 = time.monotonic()
+        resp = await client.post(_T2I_PATH, headers=headers, json=payload)
+        elapsed = time.monotonic() - t0
 
-    response = await client.images.generate(
-        model=model,
-        prompt="A single red apple on a white background, photorealistic",
-        n=1,
-        size="512x512",
-    )
+    print(f"\nHTTP {resp.status_code}  ({elapsed:.2f}s)")
+    print("── raw create response ────────────────────────────────────")
+    try:
+        body = resp.json()
+        print(json.dumps(body, indent=2))
+    except Exception:
+        print(resp.text)
+    print("────────────────────────────────────────────────────────")
 
-    elapsed = time.monotonic() - t0
-    print(f"latency  : {elapsed:.2f}s")
-    print(f"raw response type: {type(response)}")
-
-    if response.data:
-        img = response.data[0]
-        url = img.url
-        b64 = getattr(img, "b64_json", None)
-
-        print(f"url      : {url}")
-        print(f"b64_json : {'present' if b64 else 'absent'}")
-
-        if url:
-            import httpx
-            async with httpx.AsyncClient() as http:
-                r = await http.get(url, follow_redirects=True)
-                r.raise_for_status()
-                dest = Path("/tmp/auteur_smoke_image.png")
-                dest.write_bytes(r.content)
-                print(f"saved    : {dest} ({len(r.content):,} bytes)")
-        elif b64:
-            import base64
-            dest = Path("/tmp/auteur_smoke_image.png")
-            dest.write_bytes(base64.b64decode(b64))
-            print(f"saved    : {dest}")
-
-        print("\n✓ Image smoke test passed")
-    else:
-        print(f"\n✗ No image data in response: {response}")
+    if resp.status_code not in (200, 202):
+        print(f"\n✗ Task creation failed (HTTP {resp.status_code})")
         sys.exit(1)
+
+    body = resp.json()
+    task_id = body.get("output", {}).get("task_id")
+    if not task_id:
+        print("\n⚠ Could not locate task_id — inspect output above")
+        sys.exit(0)
+
+    print(f"\ntask_id  : {task_id}")
+    print("polling  : waiting for SUCCEEDED (image gen takes ~20–60s) …")
+
+    poll_headers = {"Authorization": f"Bearer {key}"}
+    poll_url = _TASK_PATH.format(task_id=task_id)
+
+    async with httpx.AsyncClient(base_url=_DASHSCOPE_BASE, timeout=300) as client:
+        for _ in range(30):
+            await asyncio.sleep(10)
+            poll_resp = await client.get(poll_url, headers=poll_headers)
+            poll_body = poll_resp.json()
+            status = poll_body.get("output", {}).get("task_status", "")
+            print(f"  status : {status}")
+
+            if status == "SUCCEEDED":
+                print("\n── poll response ──────────────────────────────────")
+                print(json.dumps(poll_body, indent=2))
+                print("────────────────────────────────────────────────")
+
+                results = poll_body.get("output", {}).get("results", [])
+                url = results[0].get("url") if results else None
+                if url:
+                    img = await client.get(url, follow_redirects=True)
+                    SMOKE_IMAGE.write_bytes(img.content)
+                    print(f"\nsaved    : {SMOKE_IMAGE} ({len(img.content):,} bytes)")
+                    print("\n✓ Image smoke test passed")
+                else:
+                    print(f"\n⚠ No URL in response: {poll_body}")
+                    sys.exit(1)
+                return
+
+            if status in ("FAILED", "CANCELED"):
+                print("\n── poll response ──────────────────────────────────")
+                print(json.dumps(poll_body, indent=2))
+                print(f"\n✗ Task {status}")
+                sys.exit(1)
+
+    print("\n✗ Timed out waiting for image generation")
+    sys.exit(1)
 
 
 if __name__ == "__main__":

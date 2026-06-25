@@ -11,8 +11,13 @@ import base64
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+from _env import load_dotenv
+
+load_dotenv()
 
 
 # DashScope's video generation is NOT on the OpenAI-compatible endpoint —
@@ -32,7 +37,7 @@ async def main() -> None:
         sys.exit(1)
 
     model = os.getenv("MODEL_I2V", "wan2.1-i2v-turbo")
-    image_path = Path("/tmp/auteur_smoke_image.png")
+    image_path = Path(tempfile.gettempdir()) / "auteur_smoke_image.png"
 
     if not image_path.exists():
         print(f"✗ {image_path} not found — run smoke_image.py first")
@@ -68,7 +73,7 @@ async def main() -> None:
         elapsed = time.monotonic() - t0
 
     print(f"\nHTTP {resp.status_code}  ({elapsed:.2f}s)")
-    print("── raw response ────────────────────────────────────")
+    print("── raw response ──────────────────────────────────")
     try:
         body = resp.json()
         print(json.dumps(body, indent=2))
@@ -101,7 +106,7 @@ async def main() -> None:
         poll_resp = await client.get(poll_url, headers={"Authorization": f"Bearer {key}"})
 
     print(f"\nHTTP {poll_resp.status_code}")
-    print("── poll response ───────────────────────────────────")
+    print("── poll response ─────────────────────────────────")
     try:
         print(json.dumps(poll_resp.json(), indent=2))
     except Exception:

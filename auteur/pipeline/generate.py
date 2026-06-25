@@ -2,15 +2,55 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 
+import httpx
+
 from auteur.config import settings
+from auteur.dashscope import BASE, _auth, fetch_task
+from auteur.jobs.polling import poll_until_done
 from auteur.jobs.queue import JobQueue
 from auteur.models import FilmProject, Shot, ShotStatus
+from auteur.pipeline.design import _download, generate_image
 
 logger = logging.getLogger(__name__)
+
+_I2V_PATH = "/api/v1/services/aigc/video-generation/video-synthesis"
+
+
+async def _create_video_task(
+    image_path: Path,
+    prompt: str,
+    duration: int,
+    seed: int | None,
+) -> str:
+    """Submit an image-to-video task to DashScope; return task_id."""
+    import base64
+
+    image_b64 = base64.b64encode(image_path.read_bytes()).decode()
+    image_data_uri = f"data:image/png;base64,{image_b64}"
+
+    params: dict = {"duration": duration}
+    if seed is not None:
+        params["seed"] = seed
+
+    payload = {
+        "model": settings.model_i2v,
+        "input": {"image": image_data_uri, "prompt": prompt},
+        "parameters": params,
+    }
+    headers = {**_auth(), "X-DashScope-Async": "enable"}
+
+    async with httpx.AsyncClient(base_url=BASE, timeout=30) as client:
+        resp = await client.post(_I2V_PATH, json=payload, headers=headers)
+        resp.raise_for_status()
+        body = resp.json()
+
+    task_id = body.get("output", {}).get("task_id")
+    if not task_id:
+        raise RuntimeError(f"No task_id in i2v creation response: {body}")
+    return task_id
 
 
 async def generate_shot(
@@ -21,18 +61,14 @@ async def generate_shot(
 ) -> Shot:
     """Render one shot: keyframe image then animated clip.
 
-    Skips shots already in ACCEPTED or GENERATING state (idempotent).
+    Skips shots already in ACCEPTED state (idempotent).
     """
-    from auteur.client import dashscope_client
-    from auteur.jobs.polling import poll_until_done, JobFailedError
-
     if shot.status == ShotStatus.ACCEPTED:
         return shot
 
     shot_dir = output_dir / project.id / "shots" / str(shot.index)
     shot_dir.mkdir(parents=True, exist_ok=True)
 
-    client = dashscope_client()
     shot.status = ShotStatus.GENERATING
     shot.attempts += 1
 
@@ -43,18 +79,8 @@ async def generate_shot(
         logger.info("shot %d: generating keyframe", shot.index)
 
         async def _gen_keyframe() -> None:
-            result = await client.images.generate(
-                model=settings.model_image,
-                prompt=kf_prompt,
-                n=1,
-                size="1920x1080",
-                seed=project.seed,
-            )
-            url = result.data[0].url if result.data else None
-            if url:
-                from auteur.pipeline.design import _download
-                await _download(url, keyframe_path)
-                project.cost.image_count += 1
+            await generate_image(kf_prompt, keyframe_path, size="1280*720", seed=project.seed)
+            project.cost.image_count += 1
 
         await queue.run(_gen_keyframe())
 
@@ -66,32 +92,19 @@ async def generate_shot(
         logger.info("shot %d: animating keyframe (attempt %d)", shot.index, shot.attempts)
 
         async def _animate() -> None:
-            # DashScope i2v: create task, poll until done
-            task_resp = await client.post(
-                "/video/generations",
-                body={
-                    "model": settings.model_i2v,
-                    "input": {
-                        "image_url": _file_to_data_uri(keyframe_path),
-                        "prompt": shot.prompt,
-                    },
-                    "parameters": {
-                        "duration": int(shot.duration),
-                        "seed": project.seed,
-                    },
-                },
-                cast_to=dict,
+            task_id = await _create_video_task(
+                keyframe_path,
+                shot.prompt,
+                int(shot.duration),
+                project.seed,
             )
-            task_id = task_resp["output"]["task_id"]
             shot.generation_params = {"model": settings.model_i2v, "task_id": task_id}
 
-            async def _fetch(tid: str) -> dict:
-                return await client.get(f"/video/generations/{tid}", cast_to=dict)
+            result = await poll_until_done(task_id, fetch_task)
+            video_url = result.get("output", {}).get("video_url")
+            if not video_url:
+                raise RuntimeError(f"No video_url in i2v result: {result}")
 
-            final = await poll_until_done(task_id, _fetch)
-            video_url = final["output"]["video_url"]
-
-            from auteur.pipeline.design import _download
             await _download(video_url, clip_path)
             project.cost.video_seconds += shot.duration
 
@@ -126,9 +139,3 @@ def _keyframe_prompt(shot: Shot, project: FilmProject) -> str:
         names = ", ".join(shot.characters)
         refs = f" Characters present: {names}."
     return f"{shot.prompt}{refs} Style: {project.style}. {shot.continuity_note}"
-
-
-def _file_to_data_uri(path: Path) -> str:
-    import base64
-    data = base64.b64encode(path.read_bytes()).decode()
-    return f"data:image/png;base64,{data}"
