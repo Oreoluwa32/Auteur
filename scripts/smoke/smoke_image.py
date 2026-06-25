@@ -31,47 +31,49 @@ async def main() -> None:
         print("✗ DASHSCOPE_API_KEY not set")
         sys.exit(1)
 
-    model = os.getenv("MODEL_IMAGE", "wanx2.1-t2i-turbo")
+    # Try the env-configured model first, then fall back to known alternatives.
+    _model_env = os.getenv("MODEL_IMAGE", "")
+    _candidates = [
+        _model_env,
+        "wanx2.1-t2i-turbo",
+        "wanx2.0-t2i-turbo",
+        "wanx-v1",
+    ]
+    candidates = list(dict.fromkeys(m for m in _candidates if m))  # dedup, keep order
 
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "X-DashScope-Async": "enable",
     }
-    payload = {
-        "model": model,
-        "input": {"prompt": "A single red apple on a white background, photorealistic"},
-        "parameters": {"size": "1024*1024", "n": 1},
-    }
 
-    print(f"model    : {model}")
-    print(f"creating task at {_DASHSCOPE_BASE}{_T2I_PATH} …")
+    model = None
+    body = {}
+    for candidate in candidates:
+        payload = {
+            "model": candidate,
+            "input": {"prompt": "A single red apple on a white background, photorealistic"},
+            "parameters": {"size": "1024*1024", "n": 1},
+        }
+        print(f"trying   : {candidate}")
+        async with httpx.AsyncClient(base_url=_DASHSCOPE_BASE, timeout=30) as client:
+            resp = await client.post(_T2I_PATH, headers=headers, json=payload)
+        if resp.status_code in (200, 202):
+            body = resp.json()
+            if body.get("output", {}).get("task_id"):
+                model = candidate
+                print(f"model    : {candidate}  ← accepted")
+                print(f"\n  Add MODEL_IMAGE={candidate} to your .env to skip probing next time.\n")
+                break
+        err = resp.json().get("message", "") if resp.content else ""
+        print(f"           HTTP {resp.status_code} — {err}")
 
-    async with httpx.AsyncClient(base_url=_DASHSCOPE_BASE, timeout=30) as client:
-        t0 = time.monotonic()
-        resp = await client.post(_T2I_PATH, headers=headers, json=payload)
-        elapsed = time.monotonic() - t0
-
-    print(f"\nHTTP {resp.status_code}  ({elapsed:.2f}s)")
-    print("── raw create response ────────────────────────────────────")
-    try:
-        body = resp.json()
-        print(json.dumps(body, indent=2))
-    except Exception:
-        print(resp.text)
-    print("────────────────────────────────────────────────────────")
-
-    if resp.status_code not in (200, 202):
-        print(f"\n✗ Task creation failed (HTTP {resp.status_code})")
+    if model is None:
+        print("\n✗ No working image model found. Check your DashScope account permissions.")
         sys.exit(1)
 
-    body = resp.json()
-    task_id = body.get("output", {}).get("task_id")
-    if not task_id:
-        print("\n⚠ Could not locate task_id — inspect output above")
-        sys.exit(0)
-
-    print(f"\ntask_id  : {task_id}")
+    task_id = body["output"]["task_id"]
+    print(f"task_id  : {task_id}")
     print("polling  : waiting for SUCCEEDED (image gen takes ~20–60s) …")
 
     poll_headers = {"Authorization": f"Bearer {key}"}
