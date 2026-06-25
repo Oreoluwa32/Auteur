@@ -36,6 +36,7 @@ async def main() -> None:
     _candidates = [
         _model_env,
         "wanx2.1-t2i-turbo",
+        "wanx2.1-t2i-plus",
         "wanx2.0-t2i-turbo",
         "wanx-v1",
     ]
@@ -69,7 +70,15 @@ async def main() -> None:
         print(f"           HTTP {resp.status_code} — {err}")
 
     if model is None:
-        print("\n✗ No working image model found. Check your DashScope account permissions.")
+        print("\n✗ No working image model found.")
+        print("  All candidates returned 'Model not exist' — this usually means the")
+        print("  Wan image-generation service is not activated on your account.")
+        print()
+        print("  To activate it:")
+        print("  1. Open https://dashscope-intl.console.aliyuncs.com/")
+        print("  2. Navigate to Model Square → Image Generation")
+        print("  3. Enable / subscribe to the Wan text-to-image service")
+        print("  4. Re-run this script")
         sys.exit(1)
 
     task_id = body["output"]["task_id"]
