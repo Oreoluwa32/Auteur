@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from typing import Any, Callable, Coroutine
 
 from tenacity import (
@@ -28,8 +29,8 @@ async def poll_until_done(
     task_id: str,
     fetch_status: Callable[[str], Coroutine[Any, Any, dict]],
     *,
-    poll_interval: int | None = None,
-    timeout: int | None = None,
+    poll_interval: float | None = None,
+    timeout: float | None = None,
 ) -> dict:
     """Poll a task until it reaches a terminal state.
 
@@ -50,8 +51,8 @@ async def poll_until_done(
     interval = poll_interval if poll_interval is not None else settings.job_poll_interval
     deadline = timeout if timeout is not None else settings.job_timeout
 
-    elapsed = 0
-    while elapsed < deadline:
+    start = time.monotonic()
+    while (time.monotonic() - start) < deadline:
         result = await fetch_status(task_id)
         status = result.get("status", "")
 
@@ -64,7 +65,6 @@ async def poll_until_done(
 
         logger.debug("task %s status=%s, waiting %ds", task_id, status, interval)
         await asyncio.sleep(interval)
-        elapsed += interval
 
     raise JobTimeoutError(f"Task {task_id} timed out after {deadline}s")
 

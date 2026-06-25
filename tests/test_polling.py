@@ -48,7 +48,8 @@ async def test_raises_on_timeout():
         return {"status": "running"}
 
     with pytest.raises(JobTimeoutError):
-        await poll_until_done("t1", always_pending, poll_interval=0, timeout=1)
+        # 0.01s is enough to confirm the timeout path without busy-spinning long
+        await poll_until_done("t1", always_pending, poll_interval=0, timeout=0.01)
 
 
 @pytest.mark.asyncio

@@ -47,11 +47,20 @@ cp .env.example .env
 
 pip install -e ".[dev]"
 
-# Start the API server
-uvicorn auteur.api.app:app --reload
+# Verify your API key + model IDs work before a full run
+bash scripts/smoke/run_all.sh
 
-# Or run a film directly
-python -m auteur.cli "A lone astronaut discovers a garden on Mars"
+# Run a film
+python -m auteur run "A lone astronaut discovers a garden on Mars" --seed 42
+
+# Resume an interrupted run
+python -m auteur resume <project-id>
+
+# Check run status
+python -m auteur status <project-id>
+
+# Or start the API server
+uvicorn auteur.api.app:app --reload
 ```
 
 ## Running tests
